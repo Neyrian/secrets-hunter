@@ -32,7 +32,7 @@ secret-hunter/
 Clone the repository and install the verified dependencies:
 
 ```bash
-git clone [https://github.com/yourusername/secret-hunter.git](https://github.com/yourusername/secret-hunter.git)
+git clone [https://github.com/Neyrian/secrets-hunter.git](https://github.com/Neyrian/secrets-hunter.git)
 cd secret-hunter
 pip install -r requirements.txt
 ```
