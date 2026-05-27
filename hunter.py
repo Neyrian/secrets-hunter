@@ -19,18 +19,28 @@ from rules import scan_line
 # Magic hash representing an absolute empty tree state in Git
 GIT_EMPTY_TREE_SHA = "4b825dc642cb6eb9a030e54bf8d69288fbee4904"
 
+# Global blocklist for binary, media, and compiled extensions
+IGNORED_EXTENSIONS = {
+    ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff", ".ico", ".webp",
+    ".exe", ".dll", ".so", ".dylib", ".bin", ".class", ".pyc", ".jar",
+    ".zip", ".tar", ".gz", ".7z", ".rar", ".bz2", ".xz",
+    ".mp4", ".mp3", ".avi", ".mov", ".wav", ".flac",
+    ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+    ".sqlite", ".db", ".iso", ".img"
+}
+
 # ----------------------------------------------------------------------
 # 1. THREAD-SAFE ANALYSIS WORKERS
 # ----------------------------------------------------------------------
 
-def worker_scan_file(file_path: str, display_name: str = None):
+def worker_scan_file(file_path: str, display_name: str = None, scan_all: bool = False):
     """
     Scans a single local file for hardcoded secrets.
 
     Args:
         file_path (str): The absolute or relative path to the file on disk.
-        display_name (str, optional): A custom name to display in the findings output. 
-            Defaults to None.
+        display_name (str, optional): A custom name to display in the findings output. Defaults to None
+        scan_all (bool): If True, ignores the non-text extension filter. Defaults to False.
 
     Returns:
         list: A list of dictionaries, where each dictionary represents a discovered finding.
@@ -38,6 +48,11 @@ def worker_scan_file(file_path: str, display_name: str = None):
     if not display_name:
         display_name = file_path
         
+    if not scan_all:
+        _, ext = os.path.splitext(file_path.lower())
+        if ext in IGNORED_EXTENSIONS:
+            return []
+            
     local_findings = []
     try:
         with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
@@ -51,17 +66,16 @@ def worker_scan_file(file_path: str, display_name: str = None):
     return local_findings
 
 
-def worker_scan_commit(commit_hash: str, parent_hash: str, repo_path: str):
+def worker_scan_commit(commit_hash: str, parent_hash: str, repo_path: str, scan_all: bool = False):
     """
     Analyzes a single Git commit diff for leaked secrets.
-
     This function compares a commit against its parent. If the commit is the 
-    initial root commit, it cleanly diffs against Git's absolute empty tree.
-
+    initial root commit, it cleanly traverses the entire tree instead of diffing.
     Args:
         commit_hash (str): The SHA-1 hash of the target commit to scan.
         parent_hash (str): The SHA-1 hash of the parent commit.
         repo_path (str): The local file path to the cloned repository.
+        scan_all (bool): If True, ignores the non-text extension filter. Defaults to False.
 
     Returns:
         list: A list of finding dictionaries mapped to the commit's historical metadata.
@@ -73,13 +87,33 @@ def worker_scan_commit(commit_hash: str, parent_hash: str, repo_path: str):
         
         # If no parent exists, diff against Git's absolute empty tree state
         if parent_hash == GIT_EMPTY_TREE_SHA:
-            empty_tree = repo.tree(GIT_EMPTY_TREE_SHA)
-            diffs = empty_tree.diff(commit.tree, create_patch=True)
-        else:
-            parent = repo.commit(parent_hash)
-            diffs = parent.diff(commit, create_patch=True)
+            for item in commit.tree.traverse():
+                if item.type == 'blob':  # 'blob' = files
+                    if not scan_all:
+                        _, ext = os.path.splitext(item.path.lower())
+                        if ext in IGNORED_EXTENSIONS:
+                            continue
+                            
+                    file_content = item.data_stream.read().decode('utf-8', errors='ignore')
+                    for line_num, line in enumerate(file_content.splitlines(), 1):
+                        findings = scan_line(line, line_num)
+                        for finding in findings:
+                            finding["commit"] = commit_hash[:8]
+                            finding["author"] = str(commit.author)
+                            finding["msg"] = commit.message.strip().split('\n')[0]
+                            finding["location"] = item.path
+                            local_findings.append(finding)
+            return local_findings
+            
+        parent = repo.commit(parent_hash)
+        diffs = parent.diff(commit, create_patch=True)
         
         for diff in diffs:
+            if diff.b_path and not scan_all:
+                _, ext = os.path.splitext(diff.b_path.lower())
+                if ext in IGNORED_EXTENSIONS:
+                    continue
+                    
             if diff.diff:
                 patch_lines = diff.diff.decode('utf-8', errors='ignore').splitlines()
                 for line_num, line in enumerate(patch_lines, 1):
@@ -101,13 +135,14 @@ def worker_scan_commit(commit_hash: str, parent_hash: str, repo_path: str):
 # 2. MULTI-THREADED ORCHESTRATION ENGINES
 # ----------------------------------------------------------------------
 
-def scan_directory_multithreaded(directory_path: str, max_threads: int):
+def scan_directory_multithreaded(directory_path: str, max_threads: int, scan_all: bool = False):
     """
     Recursively discovers and concurrently scans all files in a local directory.
 
     Args:
         directory_path (str): The root directory path to scan.
         max_threads (int): The maximum number of concurrent threads to spawn.
+        scan_all (bool): If True, ignores the non-text extension filter. Defaults to False.
 
     Returns:
         list: A comprehensive list of all findings discovered across the directory tree.
@@ -132,7 +167,7 @@ def scan_directory_multithreaded(directory_path: str, max_threads: int):
     return master_findings
 
 
-def scan_git_history_multithreaded(repo_url: str, max_threads: int):
+def scan_git_history_multithreaded(repo_url: str, max_threads: int, scan_all: bool = False):
     """
     Clones a remote Git repository and concurrently scans its entire commit history.
 
@@ -142,7 +177,8 @@ def scan_git_history_multithreaded(repo_url: str, max_threads: int):
     Args:
         repo_url (str): The remote URL of the Git repository.
         max_threads (int): The maximum number of concurrent threads to spawn.
-
+        scan_all (bool): If True, ignores the non-text extension filter. Defaults to False.
+        
     Returns:
         list: A deduplicated list of historical findings found across all references.
     """
@@ -185,11 +221,11 @@ def scan_git_history_multithreaded(repo_url: str, max_threads: int):
                 if commit.parents:
                     # Scan standard branch intersections
                     for parent in commit.parents:
-                        f = executor.submit(worker_scan_commit, commit.hexsha, parent.hexsha, temp_dir)
+                        f = executor.submit(worker_scan_commit, commit.hexsha, parent.hexsha, temp_dir, scan_all)
                         futures.append(f)
                 else:
                     # Handle the initial commit tracking against the empty tree
-                    f = executor.submit(worker_scan_commit, commit.hexsha, GIT_EMPTY_TREE_SHA, temp_dir)
+                    f = executor.submit(worker_scan_commit, commit.hexsha, GIT_EMPTY_TREE_SHA, temp_dir, scan_all)
                     futures.append(f)
                     
             for future in as_completed(futures):
@@ -263,10 +299,8 @@ exit 0
     try:
         with open(hook_file, "w", encoding="utf-8") as f:
             f.write(hook_content)
-        
         if os.name != "nt":
             os.chmod(hook_file, 0o755)
-            
         print(f"[+] Shield Engaged! Pre-commit guard installed safely to: {hook_file}")
     except Exception as e:
         print(f"[–] Failed to write hook file: {e}")
@@ -401,29 +435,38 @@ def main():
     parser.add_argument("--install-hook", action="store_true", help="Install SecretHunter as a native Git pre-commit hook")
     parser.add_argument("--format", choices=["console", "json", "sarif"], default="console", help="Reporting output format (Default: console)")
     parser.add_argument("-o", "--output", help="Filepath target to write results (Required for json/sarif targets)")
+    parser.add_argument("--scan-all", action="store_true", help="Scan all file types, including compiled binaries, medias....")
     
     args = parser.parse_args()
 
     if args.install_hook:
         install_pre_commit_hook()
         sys.exit(0)
+        
+    if args.scan_all:
+        print("\n" + "="*70)
+        print("[!] WARNING: '--scan-all' is enabled.")
+        print("    SecretHunter will now process non-text/binary files (images, exes, etc.).")
+        print("    This may result in high volumes of false positives, drastically")
+        print("    increase scan times, and cause the terminal to appear unresponsive.")
+        print("="*70 + "\n")
 
     findings = []
 
     if args.file:
         if os.path.exists(args.file):
-            findings = worker_scan_file(args.file)
+            findings = worker_scan_file(args.file, scan_all=args.scan_all)
         else:
             print("[–] File not found.")
             sys.exit(1)
     elif args.dir:
         if os.path.exists(args.dir):
-            findings = scan_directory_multithreaded(args.dir, args.threads)
+            findings = scan_directory_multithreaded(args.dir, args.threads, scan_all=args.scan_all)
         else:
             print("[–] Directory not found.")
             sys.exit(1)
     elif args.git:
-        findings = scan_git_history_multithreaded(args.git, args.threads)
+        findings = scan_git_history_multithreaded(args.git, args.threads, scan_all=args.scan_all)
     else:
         parser.print_help()
         sys.exit(0)
