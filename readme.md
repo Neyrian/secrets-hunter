@@ -45,6 +45,7 @@ You can scan single files, entire local directories, or fully remote repository 
 - ```-d```, ```--dir``` : Path to a local project directory to scan recursively.
 - ```-g```, ```--git``` : URL of a remote Git repository to deep-scan down to the initial commit.
 - ```-t```, ```--threads``` : Total worker thread allocation pool size (Default: 8).
+- ```--scan-all```: Tells the scanner to scan all files, including binaries and medias.
 - ```--install-hook``` : Automatically binds SecretHunter into your active repository as a native Git hook.
 - ```--format``` : Selection array for logging style (text, json, sarif).
 - ```-o```, ```--output``` : Destination file target path to write output structures (Required if format is JSON/SARIF).
