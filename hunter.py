@@ -8,6 +8,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from git import Repo
 from rules import scan_line
 
+# Magic hash representing an absolute empty tree state in Git
+GIT_EMPTY_TREE_SHA = "4b825dc642cb6eb9a030e54bf8d69288fbee4904"
+
+# ----------------------------------------------------------------------
+# 1. THREAD-SAFE ANALYSIS WORKERS
+# ----------------------------------------------------------------------
+
 def worker_scan_file(file_path: str, display_name: str = None):
     """
     Worker function executed by threads to scan a single file.
@@ -32,21 +39,25 @@ def worker_scan_file(file_path: str, display_name: str = None):
 def worker_scan_commit(commit_hash: str, parent_hash: str, repo_path: str):
     """
     Worker function executed by threads to analyze a single commit diff.
+    Supports standard diffs and initial/root commit tracking.
     """
     local_findings = []
     try:
         repo = Repo(repo_path)
         commit = repo.commit(commit_hash)
-        parent = repo.commit(parent_hash)
         
-        # Calculate the diff between this commit and its parent
-        diffs = parent.diff(commit, create_patch=True)
+        # If no parent exists, diff against Git's absolute empty tree state
+        if parent_hash == GIT_EMPTY_TREE_SHA:
+            empty_tree = repo.tree(GIT_EMPTY_TREE_SHA)
+            diffs = empty_tree.diff(commit.tree, create_patch=True)
+        else:
+            parent = repo.commit(parent_hash)
+            diffs = parent.diff(commit, create_patch=True)
         
         for diff in diffs:
             if diff.diff:
                 patch_lines = diff.diff.decode('utf-8', errors='ignore').splitlines()
                 for line_num, line in enumerate(patch_lines, 1):
-                    # Only parse additions (+) to the codebase
                     if line.startswith('+') and not line.startswith('+++'):
                         actual_code_line = line[1:]
                         findings = scan_line(actual_code_line, line_num)
@@ -55,11 +66,15 @@ def worker_scan_commit(commit_hash: str, parent_hash: str, repo_path: str):
                             finding["commit"] = commit_hash[:8]
                             finding["author"] = str(commit.author)
                             finding["msg"] = commit.message.strip().split('\n')[0]
-                            finding["location"] = diff.b_path
+                            finding["location"] = diff.b_path if diff.b_path else "unknown"
                             local_findings.append(finding)
     except Exception:
         pass
     return local_findings
+
+# ----------------------------------------------------------------------
+# 2. MULTI-THREADED ORCHESTRATION ENGINES
+# ----------------------------------------------------------------------
 
 def scan_directory_multithreaded(directory_path: str, max_threads: int):
     """Discovers all local files, scans them concurrently, and returns all findings."""
@@ -77,7 +92,6 @@ def scan_directory_multithreaded(directory_path: str, max_threads: int):
     master_findings = []
     with ThreadPoolExecutor(max_workers=max_threads) as executor:
         futures = {executor.submit(worker_scan_file, f): f for f in file_list}
-        
         for future in as_completed(futures):
             master_findings.extend(future.result())
                 
@@ -92,16 +106,44 @@ def scan_git_history_multithreaded(repo_url: str, max_threads: int):
     
     try:
         repo = Repo.clone_from(repo_url, temp_dir)
-        commits = list(repo.iter_commits())
-        print(f"[+] Clone successful. Found {len(commits)} commits to process.")
+        
+        # Explicitly force fetch internal Pull Request and Merge Request references
+        print("[*] Fetching hidden remote Pull Request and Merge Request references...")
+        try:
+            # Maps remote GitHub PR refs to local tracking pointers
+            repo.git.fetch('origin', '+refs/pull/*:refs/remotes/origin/pr/*')
+        except Exception:
+            pass
+            
+        try:
+            # Maps remote GitLab MR refs to local tracking pointers
+            repo.git.fetch('origin', '+refs/merge-requests/*:refs/remotes/origin/mr/*')
+        except Exception:
+            pass
+
+        # Set all=True to search across ALL local, remote, tags, and fetched PR/MR refs
+        commits = list(repo.iter_commits(all=True))
+        print(f"[+] Sync complete. Found {len(commits)} total commits across all branches/PRs.")
         print(f"[*] Spinning up Git Thread Pool (Threads: {max_threads})...")
+        
+        # Deduplicate commit hashes to prevent double-scanning identical commits on shared branches
+        seen_commits = set()
         
         with ThreadPoolExecutor(max_workers=max_threads) as executor:
             futures = []
-            
             for commit in commits:
+                if commit.hexsha in seen_commits:
+                    continue
+                seen_commits.add(commit.hexsha)
+                
                 if commit.parents:
-                    f = executor.submit(worker_scan_commit, commit.hexsha, commit.parents[0].hexsha, temp_dir)
+                    # Scan standard branch intersections
+                    for parent in commit.parents:
+                        f = executor.submit(worker_scan_commit, commit.hexsha, parent.hexsha, temp_dir)
+                        futures.append(f)
+                else:
+                    # Handle the initial commit tracking against the empty tree
+                    f = executor.submit(worker_scan_commit, commit.hexsha, GIT_EMPTY_TREE_SHA, temp_dir)
                     futures.append(f)
                     
             for future in as_completed(futures):
@@ -113,7 +155,16 @@ def scan_git_history_multithreaded(repo_url: str, max_threads: int):
         shutil.rmtree(temp_dir)
         print("[*] Volatile temporary files destroyed safely.")
         
-    return master_findings
+    # Final cleanup deduplication for cross-branch finding intersection
+    unique_findings = []
+    seen_findings_fingerprints = set()
+    for f in master_findings:
+        fingerprint = f"{f.get('commit','local')}-{f['location']}-{f['line']}-{f['value']}"
+        if fingerprint not in seen_findings_fingerprints:
+            seen_findings_fingerprints.add(fingerprint)
+            unique_findings.append(f)
+
+    return unique_findings
 
 def install_pre_commit_hook():
     """Hooks SecretHunter into git commit workflows."""
@@ -168,6 +219,10 @@ exit 0
     except Exception as e:
         print(f"[–] Failed to write hook file: {e}")
         sys.exit(1)
+
+# ----------------------------------------------------------------------
+# 3. EXPORT & OUTPUT ENGINES
+# ----------------------------------------------------------------------
 
 def export_json(findings: list, output_file: str):
     """Dumps raw findings array into a structured JSON file."""
@@ -249,12 +304,16 @@ def print_to_terminal(findings: list):
         print(f"    Secret:   {finding['value']}")
         print("-" * 60)
         
-    print(f"\n[+] Scan complete. Total items recovered: {len(findings)}")
+    print(f"\n[+] Scan complete. Total unique items recovered: {len(findings)}")
 
+
+# ----------------------------------------------------------------------
+# 4. CLI ENTRYPOINT
+# ----------------------------------------------------------------------
 
 def main():
     parser = argparse.ArgumentParser(
-        description="SecretHunter (v2.0 - High Performance): Concurrent git history and static analysis engine."
+        description="SecretHunter (v2.0 - Universal Coverage): Concurrent cross-branch git history and static analysis engine."
     )
     parser.add_argument("-f", "--file", help="Path to a single local file to scan")
     parser.add_argument("-d", "--dir", help="Path to a local directory to scan recursively")
@@ -300,14 +359,12 @@ def main():
             sys.exit(1)
         else:
             export_json(findings, args.output)
-            
     elif args.format == "sarif":
         if not args.output:
             print("[–] Error: You must supply a save filepath using '-o <file>' when setting format to SARIF.")
             sys.exit(1)
         else:
             export_sarif(findings, args.output)
-            
     else:
         print_to_terminal(findings)
 
