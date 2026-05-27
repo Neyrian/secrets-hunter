@@ -1,3 +1,12 @@
+"""
+SecretHunter - Rule Definitions and Detection Engines
+
+This module contains the core analytical logic for SecretHunter. It includes 
+regular expression signatures for known credential formats, mathematical 
+functions for calculating Shannon Entropy, heuristic filters for minimizing 
+false positives, and the primary orchestration function for line-by-line analysis.
+"""
+
 import math
 import re
 from typing import Dict, List, Any
@@ -45,7 +54,19 @@ COMMENT_KEYWORD_REGEX = re.compile(
 )
 
 def calculate_entropy(text: str) -> float:
-    """Calculates the Shannon Entropy of a string to detect high-randomness (passwords)."""
+    r"""
+    Calculates the Shannon Entropy of a string to detect high-randomness patterns.
+
+    The function applies the Shannon Entropy formula:
+    $$H(X) = -\sum_{i=1}^{n} P(x_i) \log_2 P(x_i)$$
+    where $P(x_i)$ is the probability of character $x_i$ appearing in the string.
+
+    Args:
+        text (str): The target string to evaluate.
+
+    Returns:
+        float: The calculated entropy value. Returns 0.0 for empty strings.
+    """
     if not text:
         return 0.0
     
@@ -64,8 +85,17 @@ def calculate_entropy(text: str) -> float:
 
 def is_valid_secret_structure(text: str) -> bool:
     """
-    An abstract mathematical validation filter to distinguish between 
-    high-entropy code/prose and actual high-entropy cryptographic keys.
+    Applies abstract mathematical validation to distinguish between high-entropy 
+    code/prose and actual cryptographic keys.
+
+    This acts as a heuristic filter to reduce false positives by analyzing 
+    character density, whitespace usage, and symbol-to-alphanumeric ratios.
+
+    Args:
+        text (str): The high-entropy string to validate.
+
+    Returns:
+        bool: True if the string geometrically resembles a valid token, False otherwise.
     """
     cleaned = text.strip()
     length = len(cleaned)
@@ -88,7 +118,15 @@ def is_valid_secret_structure(text: str) -> bool:
 
 
 def check_regex_signatures(line: str) -> List[Dict[str, Any]]:
-    """Scans the text against known patterns for concrete high-fidelity keys."""
+    """
+    Scans a text line against known patterns for concrete high-fidelity keys.
+
+    Args:
+        line (str): The line of code or text to analyze.
+
+    Returns:
+        List[Dict[str, Any]]: A list of dictionaries detailing any regex matches.
+    """
     matches = []
     for name, pattern in SECRET_PATTERNS.items():
         match = re.search(pattern, line)
@@ -102,7 +140,16 @@ def check_regex_signatures(line: str) -> List[Dict[str, Any]]:
 
 
 def check_high_entropy_strings(line: str, entropy_threshold: float = 4.5) -> List[Dict[str, Any]]:
-    """Extracts quoted assignments and flags strings with high statistical randomness."""
+    """
+    Extracts quoted assignments and flags strings exhibiting high statistical randomness.
+
+    Args:
+        line (str): The line of code or text to analyze.
+        entropy_threshold (float, optional): The minimum entropy limit. Defaults to 4.5.
+
+    Returns:
+        List[Dict[str, Any]]: A list of dictionaries detailing high-entropy findings.
+    """
     matches = []
     quoted_strings = re.findall(r"['\"`](.*?)['\"`]", line)
     
@@ -120,7 +167,15 @@ def check_high_entropy_strings(line: str, entropy_threshold: float = 4.5) -> Lis
     return matches
 
 def check_developer_comments(line: str) -> List[Dict[str, Any]]:
-    """Parses code comments to find leftover developer notes using strict boundaries."""
+    """
+    Parses code comments to find leftover developer notes using strict regex boundaries.
+
+    Args:
+        line (str): The line of code or text to analyze.
+
+    Returns:
+        List[Dict[str, Any]]: A list of dictionaries detailing suspicious comment findings.
+    """
     matches = []
     
     # Match standard comment styles
@@ -139,13 +194,22 @@ def check_developer_comments(line: str) -> List[Dict[str, Any]]:
     return matches
 
 
-
 def scan_line(line: str, line_num: int, entropy_threshold: float = 4.5) -> List[Dict[str, Any]]:
     """
-    Main orchestration engine. Passes the target line through all analysis functions,
-    merges the findings, maps the line metadata, and handles deduplication.
-    """
+    Main orchestration engine that runs a single line through all detection modules.
 
+    This function applies regex, entropy, and comment analysis sequentially. It also 
+    handles deduplication (favoring regex over entropy) and respects the inline 
+    'secret-hunter:ignore' bypass directive.
+
+    Args:
+        line (str): The line of code or text to analyze.
+        line_num (int): The line number corresponding to the text being scanned.
+        entropy_threshold (float, optional): The minimum entropy limit. Defaults to 4.5.
+
+    Returns:
+        List[Dict[str, Any]]: A merged and deduplicated list of all findings on the line.
+    """
     if "secret-hunter:ignore" in line.lower():
         return []
 
