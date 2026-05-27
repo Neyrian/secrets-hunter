@@ -1,3 +1,11 @@
+"""
+SecretHunter - Multi-threaded Orchestration & CLI Engine
+
+This module handles the core execution logic for SecretHunter. It manages 
+multi-threaded file and Git repository scanning, handles command-line argument 
+parsing, and formats the output into Console, JSON, or SARIF formats.
+"""
+
 import argparse
 import os
 import shutil
@@ -17,8 +25,15 @@ GIT_EMPTY_TREE_SHA = "4b825dc642cb6eb9a030e54bf8d69288fbee4904"
 
 def worker_scan_file(file_path: str, display_name: str = None):
     """
-    Worker function executed by threads to scan a single file.
-    Returns a list of findings.
+    Scans a single local file for hardcoded secrets.
+
+    Args:
+        file_path (str): The absolute or relative path to the file on disk.
+        display_name (str, optional): A custom name to display in the findings output. 
+            Defaults to None.
+
+    Returns:
+        list: A list of dictionaries, where each dictionary represents a discovered finding.
     """
     if not display_name:
         display_name = file_path
@@ -38,8 +53,18 @@ def worker_scan_file(file_path: str, display_name: str = None):
 
 def worker_scan_commit(commit_hash: str, parent_hash: str, repo_path: str):
     """
-    Worker function executed by threads to analyze a single commit diff.
-    Supports standard diffs and initial/root commit tracking.
+    Analyzes a single Git commit diff for leaked secrets.
+
+    This function compares a commit against its parent. If the commit is the 
+    initial root commit, it cleanly diffs against Git's absolute empty tree.
+
+    Args:
+        commit_hash (str): The SHA-1 hash of the target commit to scan.
+        parent_hash (str): The SHA-1 hash of the parent commit.
+        repo_path (str): The local file path to the cloned repository.
+
+    Returns:
+        list: A list of finding dictionaries mapped to the commit's historical metadata.
     """
     local_findings = []
     try:
@@ -77,7 +102,16 @@ def worker_scan_commit(commit_hash: str, parent_hash: str, repo_path: str):
 # ----------------------------------------------------------------------
 
 def scan_directory_multithreaded(directory_path: str, max_threads: int):
-    """Discovers all local files, scans them concurrently, and returns all findings."""
+    """
+    Recursively discovers and concurrently scans all files in a local directory.
+
+    Args:
+        directory_path (str): The root directory path to scan.
+        max_threads (int): The maximum number of concurrent threads to spawn.
+
+    Returns:
+        list: A comprehensive list of all findings discovered across the directory tree.
+    """
     print(f"[*] Initializing multi-threaded local scan (Threads: {max_threads})...")
     file_list = []
     
@@ -99,7 +133,19 @@ def scan_directory_multithreaded(directory_path: str, max_threads: int):
 
 
 def scan_git_history_multithreaded(repo_url: str, max_threads: int):
-    """Clones remote repository, scans commit diffs concurrently, and returns all findings."""
+    """
+    Clones a remote Git repository and concurrently scans its entire commit history.
+
+    This engine natively fetches all branches, tags, and hidden pull/merge requests 
+    to ensure universal security coverage.
+
+    Args:
+        repo_url (str): The remote URL of the Git repository.
+        max_threads (int): The maximum number of concurrent threads to spawn.
+
+    Returns:
+        list: A deduplicated list of historical findings found across all references.
+    """
     print(f"[*] Cloning remote repository: {repo_url}")
     temp_dir = tempfile.mkdtemp()
     master_findings = []
@@ -167,7 +213,13 @@ def scan_git_history_multithreaded(repo_url: str, max_threads: int):
     return unique_findings
 
 def install_pre_commit_hook():
-    """Hooks SecretHunter into git commit workflows."""
+    """
+    Installs SecretHunter as a native Git pre-commit hook in the local repository.
+
+    This defensive feature intercepts the 'git commit' command, isolating and 
+    scanning staged files to prevent secrets from ever being committed locally.
+    Exits the process with status 1 on failure.
+    """
     git_dir = os.path.join(os.getcwd(), ".git")
     if not os.path.isdir(git_dir):
         print("[–] Error: Active directory is not a Git repository. Run 'git init' first.")
@@ -225,7 +277,13 @@ exit 0
 # ----------------------------------------------------------------------
 
 def export_json(findings: list, output_file: str):
-    """Dumps raw findings array into a structured JSON file."""
+    """
+    Exports the scanning results to a standard JSON file.
+
+    Args:
+        findings (list): The list of finding dictionaries to serialize.
+        output_file (str): The destination file path.
+    """
     try:
         with open(output_file, 'w', encoding='utf-8') as f:
             json.dump(findings, f, indent=4)
@@ -235,7 +293,16 @@ def export_json(findings: list, output_file: str):
 
 
 def export_sarif(findings: list, output_file: str):
-    """Transforms tracking schemas into the global industry standard SARIF v2.1.0."""
+    """
+    Transforms and exports findings into the industry-standard SARIF v2.1.0 format.
+
+    SARIF (Static Analysis Results Interchange Format) allows the output to be 
+    natively ingested by GitHub Advanced Security and enterprise CI/CD platforms.
+
+    Args:
+        findings (list): The list of finding dictionaries to serialize.
+        output_file (str): The destination file path.
+    """
     sarif_output = {
         "version": "2.1.0",
         "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
@@ -291,7 +358,12 @@ def export_sarif(findings: list, output_file: str):
 
 
 def print_to_terminal(findings: list):
-    """Formats and prints findings to standard stdout."""
+    """
+    Formats and prints the discovered findings directly to standard output.
+
+    Args:
+        findings (list): The list of finding dictionaries to display.
+    """
     for finding in findings:
         if "commit" in finding:
             print(f"\n[!] ALERT - HISTORICAL LEAK DETECTED!")
@@ -312,6 +384,13 @@ def print_to_terminal(findings: list):
 # ----------------------------------------------------------------------
 
 def main():
+    """
+    Primary entry point for the SecretHunter CLI.
+
+    Parses command-line arguments, routes the execution to the appropriate 
+    scanning engine (file, directory, or git), and handles the final output routing
+    along with system exit codes for CI/CD integration.
+    """
     parser = argparse.ArgumentParser(
         description="SecretHunter (v2.0 - Universal Coverage): Concurrent cross-branch git history and static analysis engine."
     )
