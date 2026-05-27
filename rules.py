@@ -45,7 +45,10 @@ SECRET_PATTERNS: Dict[str, str] = {
     "Generic Bearer Token": r"(?i)bearer\s+[A-Za-z0-9_\-\.]{20,}",
     "SSH/Generic Private Key": r"-----BEGIN (RSA|OPENSSH|DSA|EC|PGP) PRIVATE KEY-----",
     "Database Connection String": r"(mongodb(?:\+srv)?|postgres|postgresql|mysql|sqlite|redis):\/\/[^:\s]+:[^@\s]+@[^?\s]+",
-    "Basic Auth Header Base64": r"Basic\s+[A-Za-z0-9+/]{40,}={0,2}"
+    "Basic Auth Header Base64": r"Basic\s+[A-Za-z0-9+/]{40,}={0,2}",
+
+    # Generic Hardcoded Variable Assignments (Catches low-entropy secrets)
+    "Hardcoded Credential Assignment": r"(?i)[a-z0-9_]*(?:password|passwd|pwd|secret|token|api_key|apikey|creds|credential|auth_token)[a-z0-9_]*\s*[:=]+\s*['\"]([^'\"]{4,})['\"]"
 }
 
 COMMENT_KEYWORD_REGEX = re.compile(
@@ -190,7 +193,6 @@ def check_developer_comments(line: str) -> List[Dict[str, Any]]:
                 "description": f"Comment flagged via keyword: '{keyword_match.group(1)}'",
                 "value": comment_text
             })
-                
     return matches
 
 
